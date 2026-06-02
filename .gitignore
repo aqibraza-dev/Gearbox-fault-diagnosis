@@ -1,0 +1,61 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environment
+venv/
+env/
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs
+logs/
+*.log
+
+# MLflow
+mlruns/
+
+# Model Checkpoints
+checkpoints/
+*.pth
+*.pt
+*.ckpt
+
+# Dataset
+data/raw/
+data/interim/
+data/processed/
+
+# TensorBoard
+runs/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets
+.env
+.env.local
+.env.production
+
+# Docker
+docker-data/
+
+# Cache
+.cache/
+
+# Coverage
+htmlcov/
+.coverage
+
+# Build
+dist/
+build/

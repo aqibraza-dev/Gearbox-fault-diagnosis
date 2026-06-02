@@ -1,0 +1,27 @@
+sequence_length: 1024
+stride: 512
+batch_size: 32
+latent_dim: 100
+num_classes: 4
+embed_dim: 50
+lambda_gp: 10.0
+epochs_stage_1: 10
+epochs_stage_2: 5
+device: "cuda" # Automatically falls back to cpu in code if cuda is unavailable
+
+csv_files:
+  - "wtds_spur_current_missing_25kfs.csv"
+  - "wtds_spur_current_healthy_25kfs.csv"
+  - "wtds_spur_current_chipped_25kfs.csv"
+  - "wtds_spur_current_crack_25kfs.csv"
+
+class_labels: [0, 1, 2, 3]
+save_dir: "model_missing_current"
+
+# Experiment Tracking Controls
+experiment_name: "Fault_Diagnosis_WGAN_Refactor"
+run_name: "proposed_vs_baselines"
+use_mlflow: true
+use_tensorboard: true
+tensorboard_log_dir: "logs/tensorboard_logs"
+mlflow_tracking_uri: "mlruns" # Local directory or remote server HTTP URI
