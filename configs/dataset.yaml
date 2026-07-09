@@ -1,0 +1,11 @@
+mat_files_current:
+  - "wtds_spur_current_missing_25kfs.mat"
+  - "wtds_spur_current_healthy_25kfs.mat"
+  - "wtds_spur_current_chipped_25kfs.mat"
+  - "wtds_spur_current_crack_25kfs.mat"
+
+mat_files_vibration:
+  - "wtds_spur_vibration_missing_25kfs.mat"
+  - "wtds_spur_vibration_healthy_25kfs.mat"
+  - "wtds_spur_vibration_chipped_25kfs.mat"
+  - "wtds_spur_vibration_crack_25kfs.mat"

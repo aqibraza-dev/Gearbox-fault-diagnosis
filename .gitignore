@@ -26,9 +26,11 @@ checkpoints/
 *.ckpt
 
 # Dataset
+data/external
 data/raw/
 data/interim/
 data/processed/
+data/split_dataset
 
 # TensorBoard
 runs/
@@ -56,6 +58,13 @@ docker-data/
 htmlcov/
 .coverage
 
+#paper
+paper/
+paper/main.tex
+
 # Build
 dist/
 build/
+
+#models
+oldModels/
