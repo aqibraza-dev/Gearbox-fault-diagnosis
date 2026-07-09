@@ -1,0 +1,367 @@
+\documentclass[12pt]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{float}
+\usepackage[margin=1in]{geometry}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{tabularx}
+
+\title{Gearbox Fault Diagnosis Using an STFT-2D Deep Learning Model with GAN-Based Data Augmentation: A Physics-Informed Neural Network (PINN) Research Framework}
+\author{Aqib Raza \\ \href{mailto:alaqibraza@gmail.com}{alaqibraza@gmail.com}}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Methodology}
+This section presents the final proposed model for gearbox fault diagnosis -- a Short-Time Fourier Transform 2D Classifier (STFT-2D) -- together with the conditional Wasserstein GAN (WGAN-GP) pipeline used to generate additional training signals for it, the baseline architectures used for comparison, the formal loss functions optimized during training, and the two-stage training protocol implemented in the accompanying code. For clarity and reproducibility, each network is described layer-by-layer, with explicit tensor shapes derived directly from the implemented modules.
+
+\emph{A note on scope.} The broader codebase from which this pipeline is drawn includes a hook for a physics-informed neural network (PINN) style loss term, imported in earlier versions of the training script as \texttt{PINNStyleTransferLoss} from \texttt{src.models.losses}. The training script used to produce the results in this paper explicitly removes this import and does not instantiate a PINN criterion. Consequently, none of the results reported here reflect physics-informed regularization -- the final STFT-2D model is trained purely on the data-driven losses of Section~1.4. This is stated explicitly for transparency: the physics-informed component belongs to the wider research direction this pipeline sits within, but it is inactive in the present configuration.
+
+\subsection{Proposed Architecture: STFT-2D Classifier (Final Model)}
+The final proposed model transforms 1D gearbox sensor signals into 2D time-frequency representations to leverage the spatial feature extraction capabilities of Convolutional Neural Networks (CNNs). Let the input signal be denoted as $X \in \mathbb{R}^{B \times C \times L}$, where $B$ is the batch size, $C=4$ is the number of channels, and $L$ is the sequence length.
+
+The signal is first flattened across the batch and channel dimensions to $X' \in \mathbb{R}^{(B \cdot C) \times L}$ and processed using a Short-Time Fourier Transform (STFT) with a window size corresponding to $N_{FFT} = 64$ and a hop length of $N_{FFT}/4 = 16$ samples (the default value used when no hop length is explicitly specified). No explicit windowing function is applied prior to the transform, which is equivalent to an implicit rectangular window. The transform is computed in complex form and its magnitude is extracted to form a spectrogram:
+\begin{equation}
+    S = |\text{STFT}(X', N_{FFT}=64, \text{hop}=16)|
+\end{equation}
+Because the STFT is one-sided (the input signal is real-valued), the number of frequency bins is fixed at $F = N_{FFT}/2 + 1 = 33$, while the number of time steps $T$ depends on the input sequence length $L$ (for example, $T=65$ when $L=1024$). The resulting magnitude tensor is reshaped back to $S \in \mathbb{R}^{B \times C \times F \times T}$, which is treated exactly like an image with $C$ colour channels and fed into a 2D CNN.
+
+The spectrogram is processed by a 2D CNN consisting of two cascaded convolutional blocks. The first block applies a $3\times3$ convolution (32 filters, zero padding of 1) followed by 2D Batch Normalization, a ReLU activation, and $2\times2$ Max Pooling (stride 2), which halves the frequency and time resolution. The second block applies a $3\times3$ convolution (64 filters, zero padding of 1) followed by 2D Batch Normalization and ReLU, and then an Adaptive Average Pooling layer that forces the spatial resolution to a fixed $4\times4$ grid irrespective of the incoming $(F,T)$ dimensions -- this design choice allows the network to accept spectrograms of variable time length without modification. The resulting $64\times4\times4$ feature map is flattened into a 1024-dimensional vector and passed through a Multi-Layer Perceptron (MLP) consisting of a linear layer with 128 hidden units, a dropout layer with rate 0.3 (applied prior to the non-linearity to mitigate overfitting), a ReLU activation, and a final linear layer that outputs the raw logits for the $C=4$ target gearbox fault classes.
+
+Table \ref{tab:stft2d} details the exact layer-by-layer configuration of the STFT-2D Classifier.
+
+\begin{table}[H]
+\centering
+\caption{Layer-by-layer architecture of the STFT-2D Classifier (final proposed model). $B$: batch size, $F=33$ frequency bins, $T$ time steps (example values shown for $L=1024$, giving $T=65$).}
+\label{tab:stft2d}
+\begin{tabular}{@{}clll@{}}
+\toprule
+\textbf{Stage} & \textbf{Layer} & \textbf{Configuration} & \textbf{Output Shape} \\
+\midrule
+0 & Input signal & -- & $(B, 4, 1024)$ \\
+1 & Reshape & flatten batch \& channel & $(B{\cdot}4,\ 1024)$ \\
+2 & STFT & $N_{FFT}{=}64$, hop${=}16$, magnitude & $(B{\cdot}4,\ 33,\ 65)$ \\
+3 & Reshape & restore channel dimension & $(B,\ 4,\ 33,\ 65)$ \\
+\midrule
+\multicolumn{4}{l}{\textit{Convolutional Block 1}} \\
+4 & Conv2d & $4{\to}32$, kernel $3{\times}3$, pad 1 & $(B,\ 32,\ 33,\ 65)$ \\
+5 & BatchNorm2d & 32 channels & $(B,\ 32,\ 33,\ 65)$ \\
+6 & ReLU & -- & $(B,\ 32,\ 33,\ 65)$ \\
+7 & MaxPool2d & kernel $2{\times}2$, stride 2 & $(B,\ 32,\ 16,\ 32)$ \\
+\midrule
+\multicolumn{4}{l}{\textit{Convolutional Block 2}} \\
+8 & Conv2d & $32{\to}64$, kernel $3{\times}3$, pad 1 & $(B,\ 64,\ 16,\ 32)$ \\
+9 & BatchNorm2d & 64 channels & $(B,\ 64,\ 16,\ 32)$ \\
+10 & ReLU & -- & $(B,\ 64,\ 16,\ 32)$ \\
+11 & AdaptiveAvgPool2d & output size $4{\times}4$ & $(B,\ 64,\ 4,\ 4)$ \\
+\midrule
+\multicolumn{4}{l}{\textit{Classification Head (MLP)}} \\
+12 & Flatten & -- & $(B,\ 1024)$ \\
+13 & Linear & $1024{\to}128$ & $(B,\ 128)$ \\
+14 & Dropout & $p{=}0.3$ & $(B,\ 128)$ \\
+15 & ReLU & -- & $(B,\ 128)$ \\
+16 & Linear & $128{\to}4$ (logits) & $(B,\ 4)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Conditional WGAN-GP: GAN-Based Data Augmentation for the Proposed Model}
+To enrich the training distribution available to the final STFT-2D model, a Conditional Wasserstein Generative Adversarial Network with Gradient Penalty (WGAN-GP) is trained to synthesize additional class-conditioned gearbox fault signals. As detailed in Section~\ref{sec:training}, the synthetic signals produced by this generator are used \emph{exclusively} to augment the training batches of the final proposed STFT-2D model (Section~1.1); no other architecture evaluated in this work consumes GAN-generated data during training. The latent noise dimension is $z \in \mathbb{R}^{100}$, class labels are embedded into a dense vector of dimension 50, and the target sequence length is $L=1024$ with $C=4$ signal channels and $4$ gearbox fault classes.
+
+\textbf{Conditional Generator ($G$):} The generator receives a latent noise vector $z\in\mathbb{R}^{100}$ and a categorical label $y$, embedded into a 50-dimensional vector via an embedding layer. The concatenated vector $(z,y)\in\mathbb{R}^{150}$ is mapped by a dense layer to $128\times(L/4)=128\times256$ values and reshaped into a $(128, 256)$ feature map. This is followed by two sequential upsampling blocks: the first applies Batch Normalization, a $\times2$ nearest-neighbour Upsample, a $3\times3$ (kernel-3) 1D convolution reducing the channel count from 128 to 64, a second Batch Normalization, and a Leaky ReLU ($\alpha=0.2$) activation; the second block applies a further $\times2$ Upsample and a kernel-3 1D convolution mapping 64 channels to the 4 output signal channels, followed by a Tanh activation that bounds the synthetic signal to $[-1,1]$. The two upsampling stages restore the sequence length from $256$ back to $1024$ ($256\to512\to1024$).
+
+\textbf{Conditional Critic ($D$):} The critic evaluates both real and synthetic time-series signals conditioned on their class labels. The 50-dimensional label embedding is linearly transformed to match the full sequence length ($1024$), reshaped to a single auxiliary channel, and concatenated with the 4-channel signal to form a 5-channel input. This is processed through two 1D convolutional layers (kernel 3, stride 2, padding 1) that progressively downsample the sequence length ($1024\to512\to256$) while increasing the channel count ($5\to64\to128$); the second convolution is followed by Layer Normalization (applied over the $128\times256$ feature map) and both convolutions use Leaky ReLU ($\alpha=0.2$) activations. The flattened features are passed through a final linear layer that outputs a single real-valued scalar assessing sample realism (no output activation, consistent with the Wasserstein critic formulation).
+
+Tables \ref{tab:generator} and \ref{tab:critic} present the layer-by-layer configurations of the Conditional Generator and Conditional Critic.
+
+\begin{table}[H]
+\centering
+\caption{Layer-by-layer architecture of the Conditional Generator ($G$). $B$: batch size.}
+\label{tab:generator}
+\begin{tabular}{@{}clll@{}}
+\toprule
+\textbf{Stage} & \textbf{Layer} & \textbf{Configuration} & \textbf{Output Shape} \\
+\midrule
+0 & Inputs & noise $z$, label $y$ & $z{:}(B,100)$, $y{:}(B,)$ \\
+1 & Embedding & 4 classes $\to$ 50-d & $(B,\ 50)$ \\
+2 & Concatenate & $[z,\ \text{embed}(y)]$ & $(B,\ 150)$ \\
+3 & Linear & $150 \to 128{\times}256$ & $(B,\ 32768)$ \\
+4 & Reshape & -- & $(B,\ 128,\ 256)$ \\
+\midrule
+\multicolumn{4}{l}{\textit{Upsampling Block 1}} \\
+5 & BatchNorm1d & 128 channels & $(B,\ 128,\ 256)$ \\
+6 & Upsample & scale factor 2 (nearest) & $(B,\ 128,\ 512)$ \\
+7 & Conv1d & $128{\to}64$, kernel 3, stride 1, pad 1 & $(B,\ 64,\ 512)$ \\
+8 & BatchNorm1d & 64 channels & $(B,\ 64,\ 512)$ \\
+9 & LeakyReLU & $\alpha{=}0.2$ & $(B,\ 64,\ 512)$ \\
+\midrule
+\multicolumn{4}{l}{\textit{Upsampling Block 2 (output)}} \\
+10 & Upsample & scale factor 2 (nearest) & $(B,\ 64,\ 1024)$ \\
+11 & Conv1d & $64{\to}4$, kernel 3, stride 1, pad 1 & $(B,\ 4,\ 1024)$ \\
+12 & Tanh & bounds output to $[-1,1]$ & $(B,\ 4,\ 1024)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[H]
+\centering
+\caption{Layer-by-layer architecture of the Conditional Critic ($D$). $B$: batch size.}
+\label{tab:critic}
+\begin{tabular}{@{}clll@{}}
+\toprule
+\textbf{Stage} & \textbf{Layer} & \textbf{Configuration} & \textbf{Output Shape} \\
+\midrule
+0 & Inputs & signal, label & signal:$(B,4,1024)$, $y$:$(B,)$ \\
+1 & Embedding & 4 classes $\to$ 50-d & $(B,\ 50)$ \\
+2 & Linear & $50 \to 1024$ (label proj.) & $(B,\ 1024)$ \\
+3 & Reshape (unsqueeze) & add channel dim & $(B,\ 1,\ 1024)$ \\
+4 & Concatenate & $[\text{signal},\ \text{label map}]$ & $(B,\ 5,\ 1024)$ \\
+\midrule
+\multicolumn{4}{l}{\textit{Discriminative Convolutional Stack}} \\
+5 & Conv1d & $5{\to}64$, kernel 3, stride 2, pad 1 & $(B,\ 64,\ 512)$ \\
+6 & LeakyReLU & $\alpha{=}0.2$ & $(B,\ 64,\ 512)$ \\
+7 & Conv1d & $64{\to}128$, kernel 3, stride 2, pad 1 & $(B,\ 128,\ 256)$ \\
+8 & LayerNorm & normalized shape $[128,\ 256]$ & $(B,\ 128,\ 256)$ \\
+9 & LeakyReLU & $\alpha{=}0.2$ & $(B,\ 128,\ 256)$ \\
+\midrule
+\multicolumn{4}{l}{\textit{Critic Output}} \\
+10 & Flatten & -- & $(B,\ 32768)$ \\
+11 & Linear & $32768 \to 1$ (realism score) & $(B,\ 1)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Baseline Comparison Architectures}
+The final proposed STFT-2D model is evaluated against seven baseline classifiers, all of which are trained on real data only (Section~\ref{sec:training}). One of these baselines -- internally identified as \texttt{(WGAN+CNN)} in the codebase and in the figures of Section~2, reflecting its shared origin with the GAN pipeline of Section~1.2 -- is a standalone 1D CNN operating directly on the raw signal, with no GAN involvement at training or inference time in this configuration.
+
+\textbf{1D-CNN Baseline (labeled ``(WGAN+CNN)''):} This classifier processes raw 1D sequences ($L=1024$, $C=4$) through two blocks of 1D convolutions (kernel 5, stride 2, padding 2), each followed by a ReLU activation and 1D Max Pooling (kernel 2); together, the two blocks reduce the sequence length by a factor of 16 ($1024\to64$) while expanding the channel count from 4 to 64. The flattened $64\times64=4096$-dimensional feature vector is classified via a single dense layer into the 4 gearbox fault categories. The penultimate flattened representation can optionally be returned alongside the logits and is the representation used for the t-SNE feature-space visualizations reported in Section 2.3.
+
+Table \ref{tab:classifier} presents its layer-by-layer configuration.
+
+\begin{table}[H]
+\centering
+\caption{Layer-by-layer architecture of the 1D-CNN baseline classifier (labeled ``(WGAN+CNN)'' in the results figures, reflecting its shared codebase origin with the GAN pipeline). $B$: batch size.}
+\label{tab:classifier}
+\begin{tabular}{@{}clll@{}}
+\toprule
+\textbf{Stage} & \textbf{Layer} & \textbf{Configuration} & \textbf{Output Shape} \\
+\midrule
+0 & Input signal & -- & $(B,\ 4,\ 1024)$ \\
+\midrule
+\multicolumn{4}{l}{\textit{Convolutional Block 1}} \\
+1 & Conv1d & $4{\to}32$, kernel 5, stride 2, pad 2 & $(B,\ 32,\ 512)$ \\
+2 & ReLU & -- & $(B,\ 32,\ 512)$ \\
+3 & MaxPool1d & kernel 2, stride 2 & $(B,\ 32,\ 256)$ \\
+\midrule
+\multicolumn{4}{l}{\textit{Convolutional Block 2}} \\
+4 & Conv1d & $32{\to}64$, kernel 5, stride 2, pad 2 & $(B,\ 64,\ 128)$ \\
+5 & ReLU & -- & $(B,\ 64,\ 128)$ \\
+6 & MaxPool1d & kernel 2, stride 2 & $(B,\ 64,\ 64)$ \\
+\midrule
+\multicolumn{4}{l}{\textit{Classification Head}} \\
+7 & Flatten & (features, returned if requested) & $(B,\ 4096)$ \\
+8 & Linear & $4096 \to 4$ (logits) & $(B,\ 4)$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The remaining six baselines -- LSTM, AdaSTNet Proxy, FT-CNN, FNO-1D, Dilated Fourier CNN, and WaveletSimCNN -- are implemented in a separate baseline module not included in the code excerpt available for this paper, and their internal layer definitions are therefore not reproduced here. All eight classifiers (the final proposed STFT-2D model and the seven baselines) are nonetheless trained and evaluated under the identical protocol of Section~\ref{sec:training}, and all results in Section~2 compare them on equal footing with respect to task, data split, and evaluation procedure.
+
+\subsection{Loss Function Formulation}
+
+\subsubsection*{1. Critic Loss ($\mathcal{L}_D$)}
+The critic evaluates both real and generated samples, attempting to maximize the separation between real and synthetic data. It is optimized using the Wasserstein loss with a gradient penalty:
+\begin{equation}
+    \mathcal{L}_{D} = -\mathbb{E}_{x\sim p_{r}}[D(x,y)] + \mathbb{E}_{z\sim p_{z}}[D(G(z,y),y)] + \lambda_{gp}\mathcal{L}_{gp}
+\end{equation}
+
+\subsubsection*{2. Gradient Penalty ($\mathcal{L}_{gp}$)}
+To enforce the 1-Lipschitz continuity constraint, a gradient penalty is computed on an interpolated sample. First, an interpolated sample $\hat{x}$ is defined between a real sample $x$ and a generated sample $\tilde{x}$:
+\begin{equation}
+    \hat{x} = \alpha x + (1-\alpha)\tilde{x}, \quad \alpha \sim U(0,1)
+\end{equation}
+Then, the gradient penalty is computed to force the gradient norm to remain close to unity:
+\begin{equation}
+    \mathcal{L}_{gp} = \mathbb{E}_{\hat{x}}\left[\left(||\nabla_{\hat{x}}D(\hat{x},y)||_{2}-1\right)^{2}\right]
+\end{equation}
+
+\subsubsection*{3. Generator Loss ($\mathcal{L}_G$)}
+The generator aims to produce synthetic samples that fool the critic. Its optimization objective is to minimize the critic's ability to distinguish its outputs:
+\begin{equation}
+    \mathcal{L}_{G} = -\mathbb{E}_{z\sim p_{z}}[D(G(z,y),y)]
+\end{equation}
+
+\subsubsection*{4. Classifier Loss ($\mathcal{L}_{cls}$)}
+For the multi-class gearbox fault diagnosis stage, a classifier assigns probabilities to each class using a softmax function:
+\begin{equation}
+    P(c|x) = \frac{e^{a_{c}}}{\sum_{j=1}^{C}e^{a_{j}}}
+\end{equation}
+Based on these probabilities, the classifier is optimized using categorical cross-entropy loss:
+\begin{equation}
+    \mathcal{L}_{cls} = -\frac{1}{N}\sum_{i=1}^{N}\sum_{c=1}^{C}\mathbb{I}(y_{i}=c)\log P(c|x_{i})
+\end{equation}
+No physics-informed residual term is added to $\mathcal{L}_{cls}$ in the configuration analyzed in this paper; see the note on scope at the start of Section~1.
+
+\subsection{Two-Stage Training Protocol}
+\label{sec:training}
+The architectures described in Sections \ref{tab:stft2d}--\ref{tab:classifier} are optimized end-to-end using the two-stage training routine implemented in the accompanying training code. Stage 1 pretrains the conditional WGAN-GP once; Stage 2 subsequently trains each of the eight classifiers (the final proposed STFT-2D model and the seven baselines of Section~1.3), optionally consuming synthetic samples from the Stage-1 generator.
+
+\subsubsection*{Stage 1: Conditional WGAN-GP Pretraining}
+The Conditional Generator $G$ and Conditional Critic $D$ (Section~1.2) are trained jointly for a configurable number of epochs (\texttt{epochs\_stage\_1}) using two independent Adam optimizers with learning rate $10^{-4}$ and betas $(0.0, 0.9)$. Within each mini-batch iteration the critic is updated once per Eq.~(2), using an interpolation coefficient $\alpha\sim U(0,1)$ (Eq.~3) sampled once per training example and broadcast identically across all channels and time steps of that example. The generator is updated only on every 5th iteration -- an effective critic-to-generator update ratio of $5{:}1$ -- using Eq.~(5). The gradient-penalty coefficient $\lambda_{gp}$ is likewise a configurable hyperparameter. Algorithm~\ref{alg:wgan} summarizes one training epoch.
+
+\begin{algorithm}[H]
+\caption{Stage 1 -- Conditional WGAN-GP training (one epoch)}
+\label{alg:wgan}
+\begin{algorithmic}[1]
+\For{each mini-batch $(x, y)$ in the training loader}
+    \State $z \sim \mathcal{N}(0, I) \in \mathbb{R}^{100}$
+    \State $\tilde{x} \gets G(z, y)$ \Comment{synthetic signal, Table \ref{tab:generator}}
+    \State $\alpha \sim U(0,1)$, one scalar per example, broadcast over channels \& time
+    \State $\hat{x} \gets \alpha x + (1-\alpha)\tilde{x}$
+    \State $\mathcal{L}_{gp} \gets \mathbb{E}_{\hat{x}}\left[(\lVert \nabla_{\hat{x}} D(\hat{x}, y)\rVert_2 - 1)^2\right]$ \Comment{Eq.~4}
+    \State $\mathcal{L}_D \gets -\mathbb{E}[D(x,y)] + \mathbb{E}[D(\tilde{x},y)] + \lambda_{gp}\mathcal{L}_{gp}$ \Comment{Eq.~2}
+    \State Update $D$ via Adam($10^{-4}$, betas $(0.0,0.9)$) on $\mathcal{L}_D$
+    \If{iteration index $i \bmod 5 = 0$}
+        \State $z' \sim \mathcal{N}(0, I)$; \ $\tilde{x}' \gets G(z', y)$
+        \State $\mathcal{L}_G \gets -\mathbb{E}[D(\tilde{x}', y)]$ \Comment{Eq.~5}
+        \State Update $G$ via Adam($10^{-4}$, betas $(0.0,0.9)$) on $\mathcal{L}_G$
+    \EndIf
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+Critic loss, generator loss, gradient-penalty magnitude, and total critic loss are logged at every iteration and exported as diagnostic training curves (critic loss, generator loss, gradient penalty, and total critic loss versus training iteration).
+
+\subsubsection*{Stage 2: Classifier Training and Conditional GAN Augmentation}
+After Stage 1 completes, $G$ is frozen (set to evaluation mode) and each of the eight classifiers in Table \ref{tab:models} is trained independently for a configurable number of epochs (\texttt{epochs\_stage\_2}) using Adam ($lr=10^{-3}$) and the categorical cross-entropy loss of Eq.~(7). Two training regimes are supported per classifier, selected by a boolean \texttt{augment} flag:
+
+\begin{itemize}
+    \item \textbf{Real-data-only} ($\texttt{augment}=\text{False}$): the classifier is trained directly on the real mini-batch $(x, y)$.
+    \item \textbf{GAN-augmented} ($\texttt{augment}=\text{True}$): a synthetic batch $\tilde{x} = G(z, y)$, $z\sim\mathcal{N}(0,I)$, is drawn from the frozen generator using the \emph{same} labels $y$ as the real batch, concatenated with the real batch along the batch dimension (doubling the effective batch size), and the combined batch $(x \Vert \tilde{x},\ y \Vert y)$ is used to compute the cross-entropy loss and gradient update.
+\end{itemize}
+
+\begin{algorithm}[H]
+\caption{Stage 2 -- Classifier training (one epoch, for a given classifier $M$)}
+\label{alg:classifier}
+\begin{algorithmic}[1]
+\For{each mini-batch $(x, y)$ in the training loader}
+    \If{\texttt{augment} is \textbf{True} and $G$ is available}
+        \State $z \sim \mathcal{N}(0, I)$; \ $\tilde{x} \gets G(z, y)$ \Comment{$G$ frozen, eval mode}
+        \State $x_{\text{batch}} \gets x \Vert \tilde{x}$; \quad $y_{\text{batch}} \gets y \Vert y$
+    \Else
+        \State $x_{\text{batch}} \gets x$; \quad $y_{\text{batch}} \gets y$
+    \EndIf
+    \State logits $\gets M(x_{\text{batch}})$
+    \State $\mathcal{L}_{cls} \gets \text{CrossEntropy}(\text{logits},\ y_{\text{batch}})$ \Comment{Eq.~7}
+    \State Update $M$ via Adam($10^{-3}$) on $\mathcal{L}_{cls}$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+In the experimental configuration used to produce the results in Section~2, the \texttt{augment} flag is set to \textbf{True} only for the final proposed STFT-2D classifier, consistent with treating GAN-based augmentation as an enhancement reserved for the final model rather than a general-purpose tool applied to every architecture. Table~\ref{tab:models} lists the eight classifiers that are instantiated and trained in this configuration:
+
+\begin{itemize}
+    \item The \textbf{final proposed STFT-2D classifier} is trained on the batch-doubled mixture of real and WGAN-GP-synthesized signals described above.
+    \item \textbf{All seven baseline classifiers -- including the ``(WGAN+CNN)'' 1D-CNN baseline of Section~1.3, despite sharing the underlying generator/critic infrastructure -- are trained on real data only} in this configuration.
+\end{itemize}
+
+This is a deliberate part of the reported experimental design rather than an oversight in this document, and it is stated explicitly here for transparency and reproducibility; it is revisited when interpreting the accuracy gap between models in Section~\ref{sec:summary}.
+
+\begin{table}[H]
+\centering
+\caption{Classifier roster actually instantiated and evaluated in the reported experiment, and whether each received GAN-based batch augmentation during Stage 2 training.}
+\label{tab:models}
+\begin{tabularx}{\textwidth}{@{}l X c@{}}
+\toprule
+\textbf{Model Identifier} & \textbf{Architecture} & \textbf{GAN Aug.\ (Stage 2)} \\
+\midrule
+Proposed STFT-2D & STFT-2D Classifier -- final model (Table \ref{tab:stft2d}) & \textbf{Yes} \\
+(WGAN+CNN) & 1D-CNN baseline (Table \ref{tab:classifier}) & No \\
+LSTM Baseline & Recurrent (LSTM) classifier & No \\
+AdaSTNet Proxy & Adaptive spectral-temporal proxy network & No \\
+FT-CNN Baseline & Fourier-Transform CNN & No \\
+FNO-1D Baseline & 1D Fourier Neural Operator & No \\
+Dilated Fourier CNN & Dilated-convolution Fourier CNN & No \\
+WaveletSimCNN & Wavelet-simulation CNN & No \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+Once Stage 2 training completes for a given classifier, it is evaluated once on the held-out test set to produce the test accuracy reported in Section~2, and its parameters are checkpointed to disk (one \texttt{.pth} file per classifier, plus a separate checkpoint for the Stage-1 generator) in an auto-incrementing experiment directory. Per-classifier training loss and accuracy curves are exported alongside the Stage-1 diagnostic plots. Experiment configuration and metrics may additionally be logged to an experiment tracker (e.g. MLflow), if enabled.
+
+\emph{Note on architecture scope:} the training codebase defines a broader library of spectral and Fourier-based classifier variants (e.g. FNet-1D, Phase-Magnitude Net, Dual-Stream Spectral Net, STFT Spectrogram CNN, Spectral Attention Net, Complex Spectral CNN, SE-FourierNet, Fourier Residual Net, Gabor Spectral Net, and two deeper FNO-1D variants). Only the eight classifiers listed in Table~\ref{tab:models} are instantiated and active in the reported experiment; the remaining variants are defined in the codebase but were not part of this run.
+
+\section{Experimental Results and Evaluation}
+To validate the effectiveness of the final proposed STFT-2D model for gearbox fault diagnosis, comprehensive evaluations were conducted against seven baseline comparisons: the ``(WGAN+CNN)'' 1D-CNN baseline (Section~1.3), together with LSTM, AdaSTNet Proxy, FT-CNN, FNO-1D, Dilated Fourier CNN, and WaveletSimCNN.
+
+\subsection{Overall Test Accuracy}
+As illustrated in Figure \ref{fig:overall_accuracy}, the proposed STFT-2D model achieved perfect classification accuracy across the test set (1.000 or 100\%). It significantly outperformed all baseline methodologies. The FNO-1D baseline (0.931) and the ``(WGAN+CNN)'' 1D-CNN baseline (0.926) served as the second and third most performant models, respectively. Architectures heavily reliant strictly on raw temporal extraction or wavelet simulations, such as WaveletSimCNN (0.636) and FT-CNN (0.651), struggled to capture the discriminative features required for this gearbox fault classification task.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{assets/accuracy_bar_chart.png}
+    \caption{Overall test accuracy across all evaluated models, demonstrating the superior performance of the final proposed STFT-2D architecture.}
+    \label{fig:overall_accuracy}
+\end{figure}
+
+\subsection{Class-wise Performance and Confusion Analysis}
+To further inspect model reliability across different gearbox fault states, class-specific condition accuracy was analyzed (Figure \ref{fig:condition_acc}), alongside confusion matrices (Figure \ref{fig:confusion_matrix}).
+
+The STFT-2D model demonstrates absolute robustness, yielding a flawless normalized confusion matrix with 1.00 on the diagonal across Class 0, Class 1, Class 2, and Class 3. The ``(WGAN+CNN)'' baseline accurately predicted Class 1 and Class 2 (1.00) but exhibited minor misclassifications between Class 0 (0.79) and Class 3 (0.92). Conversely, other baseline models showed distinct vulnerabilities; for instance, the Dilated Fourier CNN largely misclassified Class 2 instances as Class 1.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{assets/condition_accuracy_bar_chart.png}
+    \caption{Condition vs. Accuracy bar chart comparing the class-wise classification accuracy for all 8 architectures.}
+    \label{fig:condition_acc}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{assets/normalized_confusion_matrices.png}
+    \caption{Confusion matrices for all models. The final proposed STFT-2D model completely eliminates false positives and false negatives.}
+    \label{fig:confusion_matrix}
+\end{figure}
+
+\subsection{Feature Representation and Separability (t-SNE)}
+To qualitatively assess the discriminative power of the learned embeddings, t-Distributed Stochastic Neighbor Embedding (t-SNE) was applied to the high-dimensional feature spaces prior to the final classification layer (Figure \ref{fig:tsne}). For the ``(WGAN+CNN)'' 1D-CNN baseline, this corresponds to the 4096-dimensional flattened representation produced at Stage 7 of Table \ref{tab:classifier}.
+
+The final proposed STFT-2D model maps the raw signals into a latent space where all four gearbox fault classes form highly dense, perfectly isolated clusters with maximum inter-class margins. The ``(WGAN+CNN)'' baseline also exhibits strong clustering behavior, though with slight scattering compared to the STFT-2D approach. Models with lower accuracy, such as the LSTM and WaveletSimCNN baselines, show significant intra-class variance and overlapping class boundaries, confirming their numerical struggles observed in the confusion matrices.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{assets/tsne.png}
+    \caption{t-SNE visualization of the learned feature manifolds across different models.}
+    \label{fig:tsne}
+\end{figure}
+
+\subsection{ROC and AUC Analysis}
+The Receiver Operating Characteristic (ROC) curves in Figure \ref{fig:roc} evaluate the true positive rate against the false positive rate across various decision thresholds. The final proposed STFT-2D model exhibits optimal ROC curves hugging the upper-left quadrant, attaining an Area Under the Curve (AUC) of 1.00 across all four gearbox fault classes. The ``(WGAN+CNN)'' and FNO-1D baselines closely trail with AUC scores consistently between 0.98 and 1.00.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{assets/roc_curves.png}
+    \caption{Receiver Operating Characteristic (ROC) curves and corresponding AUC scores.}
+    \label{fig:roc}
+\end{figure}
+
+\subsection{Summary of Observations}
+\label{sec:summary}
+Through empirical testing, transforming gearbox sensor signals into the 2D time-frequency domain via STFT, coupled with a deep 2D-CNN, proved vastly superior for diagnostic feature extraction compared to direct 1D sequence processing (e.g., LSTM, 1D-CNNs). The perfect 100\% classification accuracy, ideal AUCs of 1.0, and distinct t-SNE cluster formations conclusively validate the final proposed STFT-2D methodology as an optimal framework for this gearbox fault diagnostic application. The layer-by-layer specifications in Tables \ref{tab:stft2d}--\ref{tab:classifier} confirm that this performance gain is achieved with a comparatively lightweight network: the STFT-2D classifier contains only two convolutional blocks and a compact MLP head, relying on the time-frequency transform itself -- rather than network depth -- to expose the discriminative structure of each fault condition.
+
+It is also important to interpret these results in light of the training design documented in Section~\ref{sec:training}: in the reported configuration, only the final proposed STFT-2D classifier is trained on the batch-doubled mixture of real and WGAN-GP-synthesized signals, while the ``(WGAN+CNN)'' baseline and every other baseline are trained on real data only. Part of the STFT-2D model's advantage may therefore be attributable to this additional synthetic training data, and not solely to the STFT-based feature representation. Disentangling these two factors -- the time-frequency architecture itself versus the GAN-based augmentation -- would require an additional controlled comparison in which the STFT-2D classifier is also evaluated without augmentation (or, conversely, a baseline is evaluated with it), which falls outside the scope of the present configuration but is a natural direction for follow-up experiments. Likewise, reintroducing the physics-informed loss term noted in Section~1 (currently disabled) is a natural next step toward the fuller PINN-based framework this pipeline is designed to support.
+
+\end{document}

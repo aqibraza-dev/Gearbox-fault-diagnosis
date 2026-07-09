@@ -4,7 +4,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 python3 - <<'PY'
-from src.training.train import main
+from src.data.dataset import load_and_prepare_data
 
-main()
+load_and_prepare_data()
 PY
